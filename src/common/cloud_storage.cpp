@@ -3177,6 +3177,30 @@ std::unique_ptr<ICloudProvider> CreateCloudProvider(const std::string& name) {
     return nullptr;
 }
 
+// 约定文件名：配置里没有显式登记该 provider 的路径时按此落点，和 UI 写入的默认名一致
+static std::string ConventionTokenFile(const std::string& providerKey) {
+    if (providerKey == "r2")     return "r2_credentials.json";
+    if (providerKey == "s3")     return "s3_credentials.json";
+    if (providerKey == "webdav" || providerKey == "dav")
+        return "webdav_credentials.json";
+#ifdef _WIN32
+    if (providerKey == "gdrive")   return "google_tokens.json";
+    if (providerKey == "onedrive") return "onedrive_tokens.json";
+#endif
+    return "tokens_" + providerKey + ".json";
+}
+
+// 凭据文件是否可用：既要是普通文件，也得真的能打开来读。
+// 只判断存在性不够，权限受限时后面 Init 一样会失败，这里提前判掉好走回退。
+static bool IsReadableFile(const std::string& path) {
+    if (path.empty()) return false;
+    const auto fsPath = FileUtil::Utf8ToPath(path);
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(fsPath, ec) || ec) return false;
+    std::ifstream probe(fsPath, std::ios::binary);
+    return probe.good();
+}
+
 std::string ResolveProviderTokenPath(const std::string& configDir,
                                      const std::string& configJson,
                                      const std::string& provider) {
@@ -3185,16 +3209,34 @@ std::string ResolveProviderTokenPath(const std::string& configDir,
     std::string p = provider;
     for (auto& c : p) c = (char)tolower((unsigned char)c);
 
+    const std::string conventionPath = configDir + ConventionTokenFile(p);
+
+    // 配置里登记的可能是上一台机器或另一个 Windows 账号的绝对路径，
+    // 换环境后该文件就不存在了。若直接采信，后面 Init 必然失败并退回纯本地模式，
+    // 用户看到的现象是云存档一直传不上去。所以这里只认真正能读到的路径，
+    // 其余一律回到当前用户的配置目录。
+    auto pickRegistered = [&](const std::string& candidate, const char* source) -> bool {
+        if (IsReadableFile(candidate)) return true;
+        LOG("[CloudStorage] Ignoring stale token path from %s (%s); falling back to %s",
+            source, candidate.c_str(), conventionPath.c_str());
+        return false;
+    };
+
     if (!configJson.empty()) {
         Json::Value root = Json::Parse(configJson);
         if (root.type == Json::Type::Object) {
             // 1) Per-provider registry (survives provider switches).
+            // 键可能写成原样或小写，两种都查一遍。
             const Json::Value& paths = root["token_paths"];
             if (root.has("token_paths") && paths.type == Json::Type::Object) {
                 for (const std::string& key : {provider, p}) {
-                    if (paths.has(key) && paths[key].type == Json::Type::String &&
-                        !paths[key].str().empty())
-                        return paths[key].str();
+                    if (!paths.has(key) || paths[key].type != Json::Type::String ||
+                        paths[key].str().empty())
+                        continue;
+                    // 命中即定论：能用就返回，不能用也直接走约定落点，
+                    // 不再往下比较 token_path，避免两个键指向不同旧路径时反复横跳。
+                    const std::string candidate = paths[key].str();
+                    return pickRegistered(candidate, "token_paths") ? candidate : conventionPath;
                 }
             }
             // 2) Active provider's token_path (legacy / single-provider path).
@@ -3203,7 +3245,8 @@ std::string ResolveProviderTokenPath(const std::string& configDir,
             if (root.has("provider") && active == p &&
                 root.has("token_path") && root["token_path"].type == Json::Type::String &&
                 !root["token_path"].str().empty()) {
-                return root["token_path"].str();
+                const std::string candidate = root["token_path"].str();
+                return pickRegistered(candidate, "token_path") ? candidate : conventionPath;
             }
         }
     }
@@ -3211,13 +3254,5 @@ std::string ResolveProviderTokenPath(const std::string& configDir,
     // 3) Convention-based fallback. Must match the exact default filenames the
     //    UI writes so a first run works before Settings has persisted an
     //    explicit token_paths entry. Windows and Linux use different names.
-    if (p == "r2")       return configDir + "r2_credentials.json";
-    if (p == "s3")       return configDir + "s3_credentials.json";
-    if (p == "webdav" || p == "dav")
-        return configDir + "webdav_credentials.json";
-#ifdef _WIN32
-    if (p == "gdrive")   return configDir + "google_tokens.json";
-    if (p == "onedrive") return configDir + "onedrive_tokens.json";
-#endif
-    return configDir + "tokens_" + p + ".json";
+    return conventionPath;
 }

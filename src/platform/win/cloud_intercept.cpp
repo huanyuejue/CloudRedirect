@@ -4254,7 +4254,7 @@ static void TryAutoUpdateDll() {
     }
 
     HINTERNET hReq = WinHttpOpenRequest(hConn, L"GET",
-        L"/repos/Selectively11/CloudRedirect/releases",
+        L"/repos/huanyuejue/CloudRedirect/releases",
         nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         WINHTTP_FLAG_SECURE);
     if (!hReq) {

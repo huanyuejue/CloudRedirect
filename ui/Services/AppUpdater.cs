@@ -15,7 +15,7 @@ namespace CloudRedirect.Services;
 /// </summary>
 internal static class AppUpdater
 {
-    private const string RepoOwner = "Selectively11";
+    private const string RepoOwner = "huanyuejue";
     private const string RepoName = "CloudRedirect";
     // Uses /releases (not /releases/latest) so prerelease/draft flags and tag
     // suffixes can be filtered client-side.
