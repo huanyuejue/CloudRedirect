@@ -91,9 +91,10 @@ public:
     // 交给 SendRequestWithAuth 处理。
     // url 用于识别预签名链接：那类地址自带授权，绝不能补 Authorization。
     void AddAuthHeaders(std::vector<std::string>& hdrs, const std::string& url) const {
+        // 签名 URL 自带授权，先判掉；字符串查找比遍历 headers 便宜，语义上也最优先
+        if (HasUrlSignature(url)) return;
         if (m_opts.authScheme == ServerAuthScheme::None ||
-            HasAuthorizationHeader(hdrs) ||
-            HasUrlSignature(url)) return;
+            HasAuthorizationHeader(hdrs)) return;
         if (m_opts.authScheme == ServerAuthScheme::Basic) {
             std::string creds = m_opts.username + ":" + m_opts.password;
             hdrs.push_back("Authorization: Basic " +
@@ -220,8 +221,8 @@ public:
         if (!hReq) { WinHttpCloseHandle(hConn); return resp; }
 
         std::vector<std::string> allHdrs = hdrs;
-        // Request 走的是 API 域名，正常不会是预签名链接；仍传完整 URL 以防万一
-        AddAuthHeaders(allHdrs, std::string("https://") + host + path);
+        // Request 走的是固定 API 域名，不会是预签名链接；传 host+path 让判断逻辑统一
+        AddAuthHeaders(allHdrs, host + path);
         for (auto& h : allHdrs) {
             auto wh = Widen(h);
             WinHttpAddRequestHeaders(hReq, wh.c_str(), (DWORD)wh.size(),
@@ -403,7 +404,7 @@ public:
 
             // 去掉认证头再跟跳转：预签名链接自带授权，带上 Bearer 会被判 401。
             // RequestUrl 内部的 AddAuthHeaders 也会识别签名 URL 跳过，这里是双保险。
-            LOG("%s Redirect to pre-signed URL, dropping Authorization", m_logTag);
+            LOG("%s Following redirect without credentials (pre-signed URL)", m_logTag);
             return RequestUrl("GET", location, {}, {});
         }
 
