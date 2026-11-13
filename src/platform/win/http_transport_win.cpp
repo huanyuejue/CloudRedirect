@@ -54,6 +54,21 @@ public:
         WinHttpSetTimeouts(hReq, 5000, 5000, sendMs, receiveMs);
     }
 
+    // 预签名 URL 自带授权凭据，再补 Authorization 会让服务端改用 Bearer 校验。
+    // SharePoint / OneDrive 的 downloadUrl 带 tempauth，一旦同时出现 Bearer，
+    // 内容端点会认为 Bearer 优先，而它的 audience 是 graph.microsoft.com，
+    // 与内容端点不匹配，直接 401。
+    static bool HasUrlSignature(const std::string& url) {
+        static const char* kParams[] = {
+            "tempauth=", "tempauth2=", "temkb=", "authkey=",   // SharePoint / OneDrive
+            "X-Amz-Signature=", "X-Goog-Signature=",           // S3 / GCS 预签名
+        };
+        for (const char* p : kParams) {
+            if (url.find(p) != std::string::npos) return true;
+        }
+        return false;
+    }
+
     // 调用方显式写了 Authorization（自定义 token 等）时以调用方为准，
     // 避免同一请求出现两个 Authorization 头把服务端搞糊涂。
     static bool HasAuthorizationHeader(const std::vector<std::string>& hdrs) {
@@ -74,9 +89,11 @@ public:
 
     // Basic/Bearer 由我预发送；Digest/NTLM/Negotiate 需要先拿 401 挑战，
     // 交给 SendRequestWithAuth 处理。
-    void AddAuthHeaders(std::vector<std::string>& hdrs) const {
+    // url 用于识别预签名链接：那类地址自带授权，绝不能补 Authorization。
+    void AddAuthHeaders(std::vector<std::string>& hdrs, const std::string& url) const {
         if (m_opts.authScheme == ServerAuthScheme::None ||
-            HasAuthorizationHeader(hdrs)) return;
+            HasAuthorizationHeader(hdrs) ||
+            HasUrlSignature(url)) return;
         if (m_opts.authScheme == ServerAuthScheme::Basic) {
             std::string creds = m_opts.username + ":" + m_opts.password;
             hdrs.push_back("Authorization: Basic " +
@@ -203,7 +220,8 @@ public:
         if (!hReq) { WinHttpCloseHandle(hConn); return resp; }
 
         std::vector<std::string> allHdrs = hdrs;
-        AddAuthHeaders(allHdrs);
+        // Request 走的是 API 域名，正常不会是预签名链接；仍传完整 URL 以防万一
+        AddAuthHeaders(allHdrs, std::string("https://") + host + path);
         for (auto& h : allHdrs) {
             auto wh = Widen(h);
             WinHttpAddRequestHeaders(hReq, wh.c_str(), (DWORD)wh.size(),
@@ -290,7 +308,7 @@ public:
         }
 
         std::vector<std::string> allHdrs = hdrs;
-        AddAuthHeaders(allHdrs);
+        AddAuthHeaders(allHdrs, fullUrl);
         for (auto& h : allHdrs) {
             auto wh = Widen(h);
             WinHttpAddRequestHeaders(hReq, wh.c_str(), (DWORD)wh.size(),
@@ -383,6 +401,9 @@ public:
             WideCharToMultiByte(CP_UTF8, 0, wLoc.c_str(), (int)wLoc.size(),
                                  location.data(), n, nullptr, nullptr);
 
+            // 去掉认证头再跟跳转：预签名链接自带授权，带上 Bearer 会被判 401。
+            // RequestUrl 内部的 AddAuthHeaders 也会识别签名 URL 跳过，这里是双保险。
+            LOG("%s Redirect to pre-signed URL, dropping Authorization", m_logTag);
             return RequestUrl("GET", location, {}, {});
         }
 
